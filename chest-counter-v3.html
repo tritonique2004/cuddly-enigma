@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#101827">
+<title>Chest Counter V3 — local</title>
+<style>
+:root{color-scheme:dark;--bg:#101827;--panel:#1b293b;--muted:#b5c1d0;--accent:#7ce3b7;--line:#34465e}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:#f5f7fb;font:16px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:env(safe-area-inset-top) 15px env(safe-area-inset-bottom)}
+main{max-width:600px;margin:auto;padding:22px 0 40px}h1{font-size:25px;margin:0 0 5px}.muted{color:var(--muted);line-height:1.45}.panel{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:14px;margin:13px 0}
+video{display:block;width:100%;aspect-ratio:16/9;object-fit:cover;background:#000;border-radius:11px}
+button{border:0;border-radius:11px;padding:13px 10px;min-height:46px;background:#344963;color:white;font-size:14px;font-weight:650}
+button.primary{background:var(--accent);color:#10251d}button:disabled{opacity:.4}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:9px}.count{font-size:56px;font-weight:800;text-align:center}.sub{text-align:center;color:var(--muted);font-size:13px}
+.status{min-height:20px;color:var(--accent);font-size:14px}.warn{color:#ffd28a;font-size:13px;line-height:1.5}
+label{display:block;font-size:13px;color:var(--muted);margin:10px 0 5px}input[type=range]{width:100%}
+.row{display:flex;justify-content:space-between;gap:10px;align-items:center}.tiny{font-size:12px;color:var(--muted)}
+</style>
+</head>
+<body><main>
+<h1>🎮 Chest Counter</h1>
+<p class="muted">V3 expérimentale : détection stabilisée et comptage automatique local. L'analyse se fait sur l'iPhone.</p>
+<section class="panel">
+<video id="video" autoplay muted playsinline></video>
+<div class="grid" style="margin-top:10px">
+<button class="primary" id="start">Autoriser la caméra</button>
+<button id="stop" disabled>Arrêter la caméra</button>
+</div>
+<p class="status" id="status">Caméra désactivée. Rien n'est filmé ni envoyé.</p>
+</section>
+<section class="panel">
+<label for="chestType">Type de coffre suivi</label>
+<select id="chestType" style="width:100%;padding:12px;border-radius:10px;background:#26384e;color:white;border:1px solid var(--line)">
+<option value="standard">Standard</option><option value="rare">Rare</option><option value="legendary">Légendaire</option><option value="other">Autre</option></select>
+<div class="count" id="count">0</div><div class="sub">coffres détectés</div>
+<div class="grid" style="margin-top:13px">
+<button id="closed" disabled>1. Mémoriser fermé</button>
+<button id="opened" disabled>2. Mémoriser ouvert</button>
+</div>
+<div class="row" style="margin-top:13px"><span class="tiny">État estimé</span><b id="state">Non calibré</b></div>
+<label for="sensitivity">Sensibilité : <span id="sv">20</span></label>
+<input id="sensitivity" type="range" min="5" max="60" value="20">
+<div class="grid" style="margin-top:10px">
+<button id="undo">Annuler −1</button><button id="reset">Remettre à zéro</button>
+</div><div class="tiny" style="margin-top:12px">Compteurs par type</div><div id="typeCounts" class="tiny" style="line-height:1.8"></div>
+</section>
+<section class="panel">
+<b>Comment faire le test</b>
+<ol class="muted" style="font-size:14px;line-height:1.6;padding-left:20px">
+<li>Pose l'iPhone stable face à la télé et cadre le coffre au centre.</li>
+<li>Avec le coffre fermé à l'écran, touche « Mémoriser fermé ».</li>
+<li>Ouvre le coffre, puis touche « Mémoriser ouvert ».</li>
+<li>Le prototype compare ensuite les images et tente de compter le passage fermé → ouvert.</li>
+</ol>
+<p class="warn">Limites : ce prototype expérimental compare les pixels d'une zone de l'image. Il peut se tromper si la caméra bouge, si l'éclairage change ou si le jeu affiche d'autres animations. Il ne garantit pas un comptage exact et ne remplace pas une vraie reconnaissance visuelle entraînée.</p>
+</section>
+<section class="panel">
+<b>Confidentialité</b>
+<p class="tiny">Cette page ne demande aucun compte, mot de passe, identifiant PSN ou Epic. Elle n'envoie aucune image sur Internet et n'utilise aucun service externe. La caméra ne démarre qu'après ton appui sur le bouton et s'arrête avec « Arrêter la caméra ». Utilise uniquement une version dont tu connais la provenance.</p>
+</section>
+<canvas id="c" width="24" height="18" hidden></canvas>
+</main>
+<script>
+'use strict';
+const $=id=>document.getElementById(id), video=$('video'), canvas=$('c'), ctx=canvas.getContext('2d',{willReadFrequently:true});
+let stream=null,timer=null,closed=null,opened=null,mode='closed',count=0,last=0;
+let counts={standard:0,rare:0,legendary:0,other:0},stableOpen=0,stableClosed=0;
+const STORE='chestCounterV3';
+function save(){try{localStorage.setItem(STORE,JSON.stringify({counts,count,closed:Array.from(closed||[]),opened:Array.from(opened||[]),type:$('chestType').value}));}catch(e){}}
+function renderCounts(){ $('typeCounts').textContent='Standard : '+counts.standard+' · Rare : '+counts.rare+' · Légendaire : '+counts.legendary+' · Autre : '+counts.other; }
+function load(){try{const d=JSON.parse(localStorage.getItem(STORE)||'null');if(!d)return;counts={...counts,...(d.counts||{})};count=Number(d.count)||0;if(d.closed)closed=new Uint8ClampedArray(d.closed);if(d.opened)opened=new Uint8ClampedArray(d.opened);if(d.type)$('chestType').value=d.type;$('count').textContent=count;renderCounts();}catch(e){}}
+function addCount(){const t=$('chestType').value;counts[t]=(counts[t]||0)+1;count++;$('count').textContent=count;renderCounts();save();}
+function status(t){$('status').textContent=t}
+function frame(){
+ if(!video.videoWidth)return null;
+ ctx.drawImage(video,0,0,24,18);
+ return ctx.getImageData(0,0,24,18).data;
+}
+function startLoop(){if(timer)clearInterval(timer);timer=setInterval(check,350)}
+async function start(){
+ if(!navigator.mediaDevices?.getUserMedia){status('Caméra indisponible : ouvre cette page dans Safari via une adresse HTTPS sécurisée.');return}
+ try{
+  stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'}}});
+  video.srcObject=stream;await video.play();
+  $('start').disabled=true;$('stop').disabled=false;$('closed').disabled=false;$('opened').disabled=false;
+  status('Caméra active. Place le coffre au centre et garde le téléphone immobile.');
+  startLoop();
+ }catch(e){status('Accès caméra refusé ou indisponible. Vérifie les autorisations Safari. ('+e.name+')')}
+}
+function stop(){
+ if(timer)clearInterval(timer);timer=null;
+ if(stream)stream.getTracks().forEach(t=>t.stop());stream=null;video.srcObject=null;
+ $('start').disabled=false;$('stop').disabled=true;$('closed').disabled=true;$('opened').disabled=true;
+ status('Caméra arrêtée.');$('state').textContent='Caméra arrêtée';
+}
+function dist(a,b){let total=0,n=0;for(let y=4;y<14;y++)for(let x=5;x<19;x++){let i=(y*24+x)*4;total+=(Math.abs(a[i]-b[i])+Math.abs(a[i+1]-b[i+1])+Math.abs(a[i+2]-b[i+2]))/3;n++}return total/n}
+function remember(which){
+ const f=frame();if(!f){status('Attends que l’image de la caméra apparaisse.');return}
+ if(which==='closed'){closed=new Uint8ClampedArray(f);mode='closed';save();status('Image du coffre fermé mémorisée. Ouvre le coffre puis mémorise son état ouvert.')}
+ else{opened=new Uint8ClampedArray(f);mode='closed';save();status('Calibration terminée : comptage automatique activé. Ne touche plus au téléphone.')}
+}
+function check(){
+ if(!closed||!opened)return;
+ const f=frame();if(!f)return;
+ const dc=dist(f,closed),dopen=dist(f,opened),margin=dc-dopen,threshold=Number($('sensitivity').value);
+ const rawOpen=margin>threshold;
+ // Trois images consécutives confirment l'ouverture ou la fermeture.
+ stableOpen=rawOpen?stableOpen+1:0;stableClosed=rawOpen?0:stableClosed+1;
+ const isOpen=stableOpen>=3;
+ $('state').textContent=isOpen?'Ouvert (confirmé)':'Fermé / transition';
+ if(isOpen&&mode!=='open'){addCount();last=Date.now();mode='open';status('Coffre détecté et compté automatiquement.')}
+ if(stableClosed>=3&&mode==='open')mode='closed';
+}
+$('start').addEventListener('click',start);$('stop').addEventListener('click',stop);
+$('closed').addEventListener('click',()=>remember('closed'));$('opened').addEventListener('click',()=>remember('open'));
+$('reset').addEventListener('click',()=>{count=0;counts={standard:0,rare:0,legendary:0,other:0};$('count').textContent='0';mode='closed';renderCounts();save();status('Compteurs remis à zéro.')});
+$('undo').addEventListener('click',()=>{const t=$('chestType').value;if(count>0){count--;counts[t]=Math.max(0,(counts[t]||0)-1);$('count').textContent=count;renderCounts();save();}});
+$('sensitivity').addEventListener('input',e=>$('sv').textContent=e.target.value);$('chestType').addEventListener('change',save);
+window.addEventListener('pagehide',()=>{save();stop()});load();renderCounts();
+</script>
+</body></html>
